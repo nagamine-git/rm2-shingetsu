@@ -6,9 +6,11 @@
 
 #include <Device.h>
 
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 
+#include <fcntl.h>
 #include <sys/inotify.h>
 #include <sys/wait.h>
 
@@ -19,27 +21,49 @@ using namespace rmlib;
 namespace {
 const char* termName = "xterm-256color";
 
+// State shared with the SIGCHLD handler.
 AppContext* globalCtx = nullptr;
+volatile sig_atomic_t shellPid = -1;
+int reapedWriteFd = -1;
 
+// Only the shell's exit stops yaft. Any other child (the mozc helper) is
+// reaped here too, and its pid is reported to the main loop.
 void
 sigHandler(int signo) {
-  if (signo == SIGCHLD) {
-    if (globalCtx != nullptr) {
-      globalCtx->stop();
-    }
-    wait(nullptr);
+  if (signo != SIGCHLD) {
+    return;
   }
+
+  const int savedErrno = errno;
+  pid_t pid = 0;
+  while ((pid = waitpid(-1, nullptr, WNOHANG)) > 0) {
+    if (pid == shellPid) {
+      if (globalCtx != nullptr) {
+        globalCtx->stop();
+      }
+    } else if (reapedWriteFd >= 0) {
+      [[maybe_unused]] auto ignored = write(reapedWriteFd, &pid, sizeof(pid));
+    }
+  }
+  errno = savedErrno;
 }
 
-void
+// Returns the read end of the pipe reaped children are reported on.
+unistdpp::FD
 initSignalHandler(AppContext& ctx) {
   globalCtx = &ctx;
+
+  int fds[2] = { -1, -1 };
+  if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) == 0) {
+    reapedWriteFd = fds[1];
+  }
 
   struct sigaction sigact{};
   memset(&sigact, 0, sizeof(struct sigaction));
   sigact.sa_handler = sigHandler;
   sigact.sa_flags = SA_RESTART;
   sigaction(SIGCHLD, &sigact, nullptr);
+  return unistdpp::FD(fds[0]);
 }
 
 bool
@@ -57,16 +81,28 @@ forkAndExec(int* master,
   ws.ws_ypixel = CELL_HEIGHT * lines;
   ws.ws_xpixel = CELL_WIDTH * cols;
 
+  // The handler has to know the shell's pid before it can see it exit.
+  sigset_t chldSet;
+  sigset_t oldSet;
+  sigemptyset(&chldSet);
+  sigaddset(&chldSet, SIGCHLD);
+  sigprocmask(SIG_BLOCK, &chldSet, &oldSet);
+
   pid = eforkpty(master, nullptr, &ws);
   if (pid < 0) {
+    sigprocmask(SIG_SETMASK, &oldSet, nullptr);
     return false;
   }
   if (pid == 0) { /* child */
+    sigprocmask(SIG_SETMASK, &oldSet, nullptr);
     setenv("TERM", termName, 1);
     execvp(cmd, argv);
     /* never reach here */
     exit(EXIT_FAILURE);
   }
+
+  shellPid = pid;
+  sigprocmask(SIG_SETMASK, &oldSet, nullptr);
   return true;
 }
 } // namespace
@@ -82,6 +118,17 @@ Yaft::getConfigAndError() const {
 
 YaftState::~YaftState() {
   signal(SIGCHLD, SIG_DFL);
+
+  if (imeSession != nullptr) {
+    imeSession->client.setFdListener(nullptr);
+  }
+
+  if (reapedWriteFd >= 0) {
+    close(reapedWriteFd);
+    reapedWriteFd = -1;
+  }
+  globalCtx = nullptr;
+  shellPid = -1;
 }
 
 void
@@ -116,7 +163,12 @@ YaftState::init(rmlib::AppContext& ctx, const rmlib::BuildContext& /*unused*/) {
     }
   }
 
-  initSignalHandler(ctx);
+  reapedFd = initSignalHandler(ctx);
+  if (reapedFd.isValid()) {
+    reapedFdHandle = ctx.listenFd(reapedFd.fd, [this, &ctx] {
+      setState([&ctx](auto& self) { self.readReapedChildren(ctx); });
+    });
+  }
 
   if (!forkAndExec(&term->fd,
                    getWidget().cmd,
@@ -155,6 +207,87 @@ YaftState::init(rmlib::AppContext& ctx, const rmlib::BuildContext& /*unused*/) {
 
   checkLandscape(ctx);
   ctx.onDeviceUpdate([this, &ctx] { modify().checkLandscape(ctx); });
+
+  applyImeConfig(ctx);
+}
+
+void
+YaftState::applyImeConfig(rmlib::AppContext& ctx) {
+  if (activeIme == config.ime &&
+      (imeSession != nullptr) == config.ime.enabled) {
+    return;
+  }
+
+  mozcFdHandle.disable();
+  mozcFd = -1;
+  if (imeSession != nullptr) {
+    imeSession->client.setFdListener(nullptr);
+
+    // The keyboard still points at it until the next rebuild.
+    std::shared_ptr<ime::ImeSession> retired = std::move(imeSession);
+    ctx.doLater([retired] {});
+  }
+
+  activeIme = config.ime;
+  if (!config.ime.enabled) {
+    return;
+  }
+
+  std::string error;
+  auto composer = ime::Composer::load(config.ime.table, &error);
+  if (!composer.has_value()) {
+    logTerm("ime: " + error + ", using the colemak table\r\n");
+    composer = ime::Composer::load("colemak");
+  }
+
+  ime::MozcClient::Options mozc;
+  mozc.root = config.ime.mozcRoot;
+  mozc.uid = config.ime.mozcUid;
+  mozc.command = config.ime.mozcCommand;
+
+  imeSession = std::make_unique<ime::ImeSession>(
+    std::move(*composer),
+    std::move(mozc),
+    ime::ImeConfig{ .escapeOff = config.ime.escapeOff });
+
+  // The pipe changes whenever the helper is (re)started or dies.
+  imeSession->client.setFdListener([this, &ctx] { syncMozcFd(ctx); });
+
+  // Spawning never waits for mozc: the handshake continues once the fd is
+  // readable, and Space reports "not ready" until then.
+  if (!imeSession->client.start()) {
+    logTerm("ime: cannot start mozc: " + imeSession->client.lastError() +
+            "\r\n");
+  }
+  syncMozcFd(ctx);
+}
+
+void
+YaftState::syncMozcFd(rmlib::AppContext& ctx) {
+  const int fd = imeSession != nullptr ? imeSession->client.fd() : -1;
+  if (fd == mozcFd) {
+    return;
+  }
+
+  mozcFdHandle.disable();
+  mozcFd = fd;
+  if (fd >= 0) {
+    mozcFdHandle = ctx.listenFd(fd, [this, &ctx] {
+      imeSession->client.onReadable();
+      setState([&ctx](auto& self) { self.syncMozcFd(ctx); });
+    });
+  }
+}
+
+void
+YaftState::readReapedChildren(rmlib::AppContext& ctx) {
+  pid_t pid = 0;
+  while (read(reapedFd.fd, &pid, sizeof(pid)) == sizeof(pid)) {
+    if (imeSession != nullptr) {
+      imeSession->client.childExited(pid);
+    }
+  }
+  syncMozcFd(ctx);
 }
 
 void
@@ -206,6 +339,7 @@ YaftState::readInotify(rmlib::AppContext& ctx) const {
 
     self.config = cfgAndErr.config;
     self.checkLandscape(ctx);
+    self.applyImeConfig(ctx);
   });
 }
 

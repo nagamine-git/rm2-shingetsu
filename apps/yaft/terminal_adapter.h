@@ -22,6 +22,11 @@ struct TermCell {
   bool hasPixmap = false; // always false; no sixel/kitty-graphics rendering.
 };
 
+// Bitmap glyph for a codepoint (builtin font first, then the CJK glyphs), or
+// nullptr if there is none.
+const glyph_t*
+lookupGlyph(uint32_t codepoint);
+
 // Adapter around libghostty-vt: owns the terminal, its render state, the pty
 // fd, and the codepoint -> bitmap-glyph lookup. Exposes roughly the same
 // shape the app relied on from libYaft's terminal_t.

@@ -57,6 +57,74 @@ specialToGhosttyKey(int scancode) {
   }
 }
 
+std::optional<ime::ImeKey>
+toImeKey(int scancode, bool shift, bool alt, bool ctrl) {
+  using Special = ime::ImeKey::Special;
+
+  const auto named = [&](Special special) {
+    return ime::ImeKey::named(special, shift, ctrl, alt);
+  };
+
+  if (scancode > 0xFF) {
+    switch (scancode) {
+      case Escape:
+        return named(Special::Escape);
+      case Tab:
+        return named(Special::Tab);
+      case Backspace:
+        return named(Special::Backspace);
+      case Enter:
+        return named(Special::Enter);
+      case Del:
+        return named(Special::Delete);
+      case Home:
+        return named(Special::Home);
+      case End:
+        return named(Special::End);
+      case Left:
+        return named(Special::Left);
+      case Up:
+        return named(Special::Up);
+      case Right:
+        return named(Special::Right);
+      case Down:
+        return named(Special::Down);
+      case PageUp:
+        return named(Special::PageUp);
+      case PageDown:
+        return named(Special::PageDown);
+      default:
+        return std::nullopt;
+    }
+  }
+
+  // Raw control codes (e.g. ctrl-c on the hidden layout).
+  if (scancode < 0x20) {
+    switch (scancode) {
+      case '\t':
+        return named(Special::Tab);
+      case '\n':
+      case '\r':
+        return named(Special::Enter);
+      case 0x1b:
+        return named(Special::Escape);
+      default:
+        return ime::ImeKey::character(char32_t(scancode | 0x60), true, alt);
+    }
+  }
+
+  if (isprint(scancode) == 0) {
+    return std::nullopt;
+  }
+
+  // Letters are stored as capitals; shift decides the case.
+  char32_t c = char32_t(scancode);
+  if (isalpha(scancode) != 0 && !shift) {
+    c = char32_t(tolower(scancode));
+  }
+  return ime::ImeKey::character(c, ctrl, alt);
+}
+
 template<typename Ev>
 int
 getSlot(const Ev& ev) {
@@ -258,6 +326,32 @@ KeyboardRenderObject::sendKeyDown(int scancode,
     return;
   }
 
+  if (scancode == ImeOn || scancode == ImeOff || scancode == ImeToggle) {
+    auto* ime = widget->params.ime;
+    if (ime != nullptr && !repeat) {
+      const auto command = scancode == ImeOn    ? ime::ImeCommand::On
+                           : scancode == ImeOff ? ime::ImeCommand::Off
+                                                : ime::ImeCommand::Toggle;
+      applyImeResult(ime->handleCommand(command));
+    }
+    return;
+  }
+
+  if (auto* ime = widget->params.ime; ime != nullptr) {
+    ime::ImeResult result;
+    if (const auto key = toImeKey(scancode, shift, alt, ctrl);
+        key.has_value()) {
+      result = ime->handleKey(*key);
+    } else {
+      result.passthrough = true;
+    }
+
+    applyImeResult(result);
+    if (!result.passthrough) {
+      return;
+    }
+  }
+
   GhosttyMods mods = 0;
   if (shift) {
     mods |= GHOSTTY_MODS_SHIFT;
@@ -296,6 +390,17 @@ KeyboardRenderObject::sendKeyDown(int scancode,
 
   std::cerr << "unknown key combo: " << scancode << " shift " << shift
             << " ctrl " << ctrl << " alt " << alt << std::endl;
+}
+
+void
+KeyboardRenderObject::applyImeResult(const ime::ImeResult& result) {
+  if (!result.commit.empty()) {
+    widget->term->write(reinterpret_cast<const uint8_t*>(result.commit.data()),
+                        result.commit.size());
+  }
+  if (widget->params.imeActivity) {
+    widget->params.imeActivity();
+  }
 }
 
 void
@@ -463,6 +568,14 @@ KeyboardRenderObject::handleKeyEvent(const rmlib::input::KeyEvent& ev) {
   const bool isTapHold = key.holdCode != 0;
 
   if (ev.type == input::KeyEvent::Press) {
+    // Any other key pressed while a tap-hold key is down makes it a chord,
+    // so its tap action must not fire on release.
+    for (auto& [otherKey, otherState] : physKeyState) {
+      if (otherKey != &key && otherState.down) {
+        otherState.tap = false;
+      }
+    }
+
     state.down = true;
     state.tap = true;
 

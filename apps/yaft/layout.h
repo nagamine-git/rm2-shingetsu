@@ -42,6 +42,11 @@ enum SpecialKeys {
   Mod1,
   Mod2,
 
+  // Input method: switch Japanese input on/off.
+  ImeOn,
+  ImeOff,
+  ImeToggle,
+
   Callback = 0x1100000,
 };
 
@@ -67,10 +72,12 @@ enum ModifierKeys {
 };
 
 extern const Layout qwerty_layout;
+extern const Layout colemak_layout;
 extern const Layout hidden_layout;
 extern const Layout empty_layout;
 
 const std::initializer_list<std::pair<std::string_view, const Layout*>>
   layouts = {
     { "qwerty", &qwerty_layout },
+    { "colemak", &colemak_layout },
   };

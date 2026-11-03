@@ -1,3 +1,6 @@
+# Consumers link `Ghostty::vt`, always the static archive: no package ships a
+# libghostty-vt.so, so a shared link would not run on the device.
+#
 # Prebuilt libghostty-vt (zig, not CMake) -- prefix supplied by
 # nix/pkgs/ghostty-vt.nix via -DGHOSTTY_VT_PREFIX, or point it at a manual
 # `zig build -Demit-lib-vt --prefix <dir>` output for local iteration.
@@ -7,6 +10,7 @@ if(GHOSTTY_VT_PREFIX)
     ghostty-vt
     PROPERTIES IMPORTED_LOCATION "${GHOSTTY_VT_PREFIX}/lib/libghostty-vt.a"
                INTERFACE_INCLUDE_DIRECTORIES "${GHOSTTY_VT_PREFIX}/include")
+  add_library(Ghostty::vt ALIAS ghostty-vt)
   return()
 endif()
 
@@ -31,3 +35,4 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/ghostty-org/ghostty.git
   GIT_TAG f64f4aca2c29b554d111b36c3d946a9bddd159ff)
 FetchContent_MakeAvailable(ghostty)
+add_library(Ghostty::vt ALIAS ghostty-vt-static)

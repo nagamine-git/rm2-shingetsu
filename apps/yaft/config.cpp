@@ -7,11 +7,14 @@
 
 namespace {
 constexpr std::string_view default_config = R"(
-# Layout of the virtual keyboard.
-layout = "qwerty"
+# Layout of the virtual keyboard: "colemak" or "qwerty".
+layout = "colemak"
 
 # Keymap for any physical keyboards. Defaults to the us rM pogo keyboard.
-keymap = "rm-qwerty"
+#  * rm-colemak, rm-qwerty: the rM Type Folio
+#  * colemak, qwerty: a USB keyboard
+#  * timower
+keymap = "rm-colemak"
 
 # Auto rotate if keyboard is connected.
 auto-rotate = true
@@ -28,6 +31,27 @@ auto-refresh = 1024
 repeat-delay = 600
 # Repeat rate in chars per second.
 repeat-rate = 25
+
+# Japanese input: Shingetsu layout composition + mozc conversion.
+# Ctrl+Space toggles it, and so do the Alt keys of the rm-colemak keymap
+# (left tap = off, right tap = on). Space converts, Enter commits.
+[ime]
+# Show the input bar and let the input method handle keys.
+enabled = true
+
+# Kana table: "colemak", "qwerty" or the path of a hazkey-style TSV.
+table = "colemak"
+
+# Escape (in direct mode) switches the input method off, handy for vim.
+escape-off = true
+
+# Directory of the mozc chroot, and the uid mozc runs as.
+mozc-root = "/home/root/.local/share/rm2-shingetsu/mozc-root"
+mozc-uid = 1000
+
+# If not empty, run this command instead of the chroot, e.g.
+# ["ssh", "host", "mozc_emacs_helper"].
+mozc-command = []
 )";
 
 void
@@ -82,6 +106,53 @@ parseMapping(
   tbl.erase(name);
 }
 
+void
+parseIme(std::optional<YaftConfigError>& errors,
+         ImeSettings& ime,
+         toml::table& tbl) {
+  const auto* node = tbl.get("ime");
+  if (node == nullptr) {
+    return;
+  }
+
+  auto* imeTbl = tbl["ime"].as_table();
+  if (imeTbl == nullptr) {
+    addError(errors, { YaftConfigError::Syntax, "error: ime must be a table" });
+    tbl.erase("ime");
+    return;
+  }
+
+  parseValue(errors, ime.enabled, *imeTbl, "enabled");
+  parseValue(errors, ime.table, *imeTbl, "table");
+  parseValue(errors, ime.escapeOff, *imeTbl, "escape-off");
+  parseValue(errors, ime.mozcRoot, *imeTbl, "mozc-root");
+  parseValue(errors, ime.mozcUid, *imeTbl, "mozc-uid");
+
+  if (const auto* command = (*imeTbl)["mozc-command"].as_array();
+      command != nullptr) {
+    ime.mozcCommand.clear();
+    for (const auto& arg : *command) {
+      if (const auto str = arg.value<std::string>(); str.has_value()) {
+        ime.mozcCommand.push_back(*str);
+      } else {
+        addError(errors,
+                 { YaftConfigError::Syntax,
+                   "error: ime.mozc-command must be a list of strings" });
+        ime.mozcCommand.clear();
+        break;
+      }
+    }
+    imeTbl->erase("mozc-command");
+  }
+
+  for (const auto& [key, _] : *imeTbl) {
+    addError(errors,
+             { YaftConfigError::Syntax,
+               "warning: Unknown key: ime." + std::string(key) });
+  }
+  tbl.erase("ime");
+}
+
 YaftConfigAndError
 getConfig(const toml::table& input) {
   auto tbl = input;
@@ -104,6 +175,7 @@ getConfig(const toml::table& input) {
   parseValue(errors, cfg.autoRefresh, tbl, "auto-refresh");
   parseValue(errors, cfg.repeatDelay, tbl, "repeat-delay");
   parseValue(errors, cfg.repeatRate, tbl, "repeat-rate");
+  parseIme(errors, cfg.ime, tbl);
 
   if (!tbl.empty()) {
     for (const auto& [key, _] : tbl) {

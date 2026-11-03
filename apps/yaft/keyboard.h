@@ -2,7 +2,10 @@
 
 #include <UI.h>
 
+#include "ime/ImeController.h"
 #include "keymap.h"
+
+#include <functional>
 
 struct KeyInfo;
 struct EvKeyInfo;
@@ -20,6 +23,11 @@ struct KeyboardParams {
 
   std::chrono::milliseconds repeatDelay;
   std::chrono::milliseconds repeatTime;
+
+  // Optional input method. Keys go through it before reaching the terminal.
+  ime::ImeController* ime = nullptr;
+  // Called after a key went through the input method.
+  std::function<void()> imeActivity;
 };
 
 /// Keyboard widget, displays a virtual keyboard of the given layout.
@@ -68,6 +76,8 @@ private:
   void updateRepeat();
 
   void updateLayout();
+
+  void applyImeResult(const ime::ImeResult& result);
 
   void sendKeyDown(const KeyInfo& key, bool repeat = false);
   void sendKeyDown(const EvKeyInfo& key, bool repeat = false);

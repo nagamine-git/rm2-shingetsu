@@ -5,18 +5,45 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "MathUtil.h"
 #include "keymap.h"
 #include "layout.h"
 
+// Japanese input (see apps/yaft/ime).
+struct ImeSettings {
+  // Show the IME bar and let the input method see keys.
+  bool enabled = true;
+
+  // "colemak", "qwerty" or the path of a hazkey-style TSV.
+  std::string table = "colemak";
+
+  // Escape in direct mode switches the input method off.
+  bool escapeOff = true;
+
+  // Where the mozc helper's chroot lives, and who it runs as.
+  std::string mozcRoot = "/home/root/.local/share/rm2-shingetsu/mozc-root";
+  int mozcUid = 1000;
+
+  // If not empty, run this command instead of the chroot helper.
+  std::vector<std::string> mozcCommand;
+
+  bool operator==(const ImeSettings& o) const {
+    return enabled == o.enabled && table == o.table &&
+           escapeOff == o.escapeOff && mozcRoot == o.mozcRoot &&
+           mozcUid == o.mozcUid && mozcCommand == o.mozcCommand;
+  }
+  bool operator!=(const ImeSettings& o) const { return !(*this == o); }
+};
+
 struct YaftConfig {
 
   // Layout for virtual keyboard.
-  const Layout* layout = layouts.begin()->second;
+  const Layout* layout = &colemak_layout;
 
   // Keymap of physical keyboard.
-  const KeyMap* keymap = keymaps.begin()->second;
+  const KeyMap* keymap = &rm_colemak_keymap;
 
   bool autoRotate = true;
   rmlib::Rotation rotation = rmlib::Rotation::None;
@@ -29,6 +56,8 @@ struct YaftConfig {
   int repeatDelay = 600;
   // Key repeat rate in chars / sec.
   int repeatRate = 25;
+
+  ImeSettings ime;
 
   static YaftConfig getDefault();
 };

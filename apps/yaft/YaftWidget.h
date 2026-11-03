@@ -1,6 +1,8 @@
 #pragma once
 
 #include "config.h"
+#include "ime/ImeBar.h"
+#include "ime/ImeSession.h"
 #include "keyboard.h"
 #include "layout.h"
 #include "screen.h"
@@ -10,6 +12,7 @@
 #include <UI/StatefulWidget.h>
 
 #include <filesystem>
+#include <memory>
 
 class YaftState;
 
@@ -65,23 +68,37 @@ public:
       rotation,
       Column(
         Expanded(Screen(term.get(), false, config.autoRefresh)),
-        Keyboard(term.get(),
-                 KeyboardParams{
-                   .layout = layout,
-                   .keymap = *config.keymap,
-                   .repeatDelay = std::chrono::milliseconds(config.repeatDelay),
-                   .repeatTime = repeatRateMs,
-                 },
-                 [this](int num) {
-                   setState([](auto& self) {
-                     self.smallKeyboard = !self.smallKeyboard;
-                   });
-                 })));
+        ImeBar(imeSession != nullptr ? imeSession->controller.view()
+                                     : ime::ImeView{},
+               /* visible */ imeSession != nullptr),
+        Keyboard(
+          term.get(),
+          KeyboardParams{
+            .layout = layout,
+            .keymap = *config.keymap,
+            .repeatDelay = std::chrono::milliseconds(config.repeatDelay),
+            .repeatTime = repeatRateMs,
+            .ime = imeSession != nullptr ? &imeSession->controller : nullptr,
+            .imeActivity =
+              [this, &ctx] {
+                setState([&ctx](auto& self) { self.syncMozcFd(ctx); });
+              },
+          },
+          [this](int num) {
+            setState(
+              [](auto& self) { self.smallKeyboard = !self.smallKeyboard; });
+          })));
   }
 
 private:
   void checkLandscape(rmlib::AppContext& ctx);
   void readInotify(rmlib::AppContext& ctx) const;
+
+  // (Re)creates the input method session if the [ime] config changed.
+  void applyImeConfig(rmlib::AppContext& ctx);
+  // Keeps the mozc pipe registered with the event loop (it changes on respawn).
+  void syncMozcFd(rmlib::AppContext& ctx);
+  void readReapedChildren(rmlib::AppContext& ctx);
 
   std::unique_ptr<Terminal> term;
   rmlib::TimerHandle pogoTimer;
@@ -93,6 +110,15 @@ private:
   rmlib::FdHandle inotifyFdHandle;
   rmlib::FdHandle termFdHandle;
   rmlib::FdHandle stdinFdHandle;
+
+  std::unique_ptr<ime::ImeSession> imeSession;
+  ImeSettings activeIme;
+  int mozcFd = -1;
+  rmlib::FdHandle mozcFdHandle;
+
+  // Read end of the pipe the SIGCHLD handler reports reaped children on.
+  unistdpp::FD reapedFd;
+  rmlib::FdHandle reapedFdHandle;
 
   YaftConfig config;
   rmlib::Rotation rotation = rmlib::Rotation::None;

@@ -251,3 +251,55 @@ const KeyMap timower_keymap = {
   { KEY_END, { Alt } },
   { KEY_DOWN, { Down } },
 };
+
+namespace {
+
+using Override = std::pair<int, EvKeyInfo>;
+
+// Colemak letters, by the position of the QWERTY key they replace.
+const std::initializer_list<Override> colemak_letters = {
+  { KEY_E, { 'F' } },         { KEY_R, { 'P' } },      { KEY_T, { 'G' } },
+  { KEY_Y, { 'J' } },         { KEY_U, { 'L' } },      { KEY_I, { 'U' } },
+  { KEY_O, { 'Y' } },         { KEY_P, { ';', ':' } }, { KEY_S, { 'R' } },
+  { KEY_D, { 'S' } },         { KEY_F, { 'T' } },      { KEY_G, { 'D' } },
+  { KEY_J, { 'N' } },         { KEY_K, { 'E' } },      { KEY_L, { 'I' } },
+  { KEY_SEMICOLON, { 'O' } }, { KEY_N, { 'K' } },
+};
+
+KeyMap
+makeColemak(KeyMap base, std::initializer_list<Override> modifiers) {
+  for (const auto& [code, info] : colemak_letters) {
+    base[code] = info;
+  }
+  for (const auto& [code, info] : modifiers) {
+    base[code] = info;
+  }
+  return base;
+}
+
+} // namespace
+
+// Like Karabiner on a Mac: CapsLock is Esc/Ctrl (tap/hold), and tapping the
+// Alt keys switches the input method off (left) or on (right).
+const KeyMap rm_colemak_keymap =
+  makeColemak(rm_qwerty_keymap,
+              {
+                { KEY_CAPSLOCK, { Escape, 0, 0, 0, Ctrl } },
+                { KEY_LEFTALT, { ImeOff, 0, 0, 0, Alt } },
+                { KEY_RIGHTALT, { ImeOn, 0, 0, 0, Alt } },
+              });
+
+// Same for USB: the Cmd/Win keys tap-switch the input method, as do the
+// Japanese keyboard's own keys.
+const KeyMap colemak_keymap =
+  makeColemak(qwerty_keymap,
+              {
+                { KEY_CAPSLOCK, { Escape, 0, 0, 0, Ctrl } },
+                { KEY_LEFTMETA, { ImeOff, 0, 0, 0, Alt } },
+                { KEY_RIGHTMETA, { ImeOn, 0, 0, 0, Alt } },
+                { KEY_MUHENKAN, { ImeOff } },
+                { KEY_HANJA, { ImeOff } },
+                { KEY_HENKAN, { ImeOn } },
+                { KEY_HANGEUL, { ImeOn } },
+                { KEY_ZENKAKUHANKAKU, { ImeToggle } },
+              });
