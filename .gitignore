@@ -9,3 +9,7 @@ default.profraw
 .direnv/
 /result
 CLAUDE.md
+
+# Output of shingetsu/ scripts (Vim, mozc root, bundle).
+/out/
+/dist/

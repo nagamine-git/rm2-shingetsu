@@ -1,6 +1,17 @@
 name: Build
 
-on: [push, pull_request]
+# The repository is private, so Actions minutes matter: runs are started by
+# pushes (and manually), a newer push cancels the older run of the same ref,
+# and the Nix build only runs on request.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -9,6 +20,7 @@ env:
 jobs:
 
   nix-build:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -65,6 +77,8 @@ jobs:
 
   build-host:
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -89,19 +103,113 @@ jobs:
       - name: Unit Tests
         run: cmake --build build/dev-host --target make-coverage
 
+      # Only with a token (none exists in a fork unless added), and never fatal.
       - name: Upload Coverage
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        continue-on-error: true
         uses: codecov/codecov-action@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }} # required
+          token: ${{ env.CODECOV_TOKEN }}
           files: ./build/dev-host/report.lcov
-          fail_ci_if_error: false # optional (default = false)
-          verbose: true # optional (default = false)
+          fail_ci_if_error: false
 
       - name: Upload Test Binary
         uses: actions/upload-artifact@v4
         with:
           name: host-package
           path: build/dev-host/tools/rm2fb-emu/rm2fb-test
+
+  # Vim (static, armv7) and the mozc chroot, with their emulated tests.
+  extras:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: 'true'
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build Vim
+        run: shingetsu/vim/build-vim.sh
+
+      - name: Test Vim
+        run: shingetsu/test/qemu-vim-test.sh
+
+      - name: Build mozc root
+        run: shingetsu/mozc/build-rootfs.sh
+
+      - name: Test mozc
+        run: shingetsu/test/qemu-mozc-test.sh
+
+      # upload-artifact does not keep symlinks or modes, so ship tarballs.
+      - name: Pack
+        run: |
+          tar -C out -czf out/vim.tar.gz vim
+          ls -l out
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: extras
+          path: |
+            out/vim.tar.gz
+            out/mozc-root-armhf.tar.gz
+            out/mozc-root-armhf.tar.gz.sha256
+
+  bundle:
+    runs-on: ubuntu-latest
+    needs: [build, extras]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: 'true'
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: inputs/cross
+
+      - name: Download extras
+        uses: actions/download-artifact@v4
+        with:
+          name: extras
+          path: inputs/extras
+
+      - name: Unpack inputs
+        run: tar -xzf inputs/extras/vim.tar.gz -C inputs/extras
+
+      - name: Make bundle
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            version=${GITHUB_REF_NAME}
+          else
+            version=dev-${GITHUB_SHA::7}
+          fi
+          shingetsu/scripts/make-bundle.sh \
+            --cross-build-dir inputs/cross \
+            --vim-dir inputs/extras/vim \
+            --mozc-tar inputs/extras/mozc-root-armhf.tar.gz \
+            --version "$version"
+
+      - name: Dry run of install.sh, uninstall.sh and try.sh
+        run: shingetsu/test/bundle-dryrun.sh dist/rm2-shingetsu-*.tar.gz
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
 
   # integration-tests:
   #   runs-on: ubuntu-latest
@@ -158,21 +266,28 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, bundle]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: write
 
     steps:
       - name: Download package
         uses: actions/download-artifact@v4
         with:
           name: package
+          path: release
 
-      - run: ls -la
+      - name: Download bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: release
+
+      - run: ls -la release
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: ./*
-
-
+          files: release/*

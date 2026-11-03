@@ -1,0 +1,18 @@
+" rm2-shingetsu default vimrc. Standard Vim keys; nothing is remapped.
+set nocompatible
+source $VIMRUNTIME/defaults.vim
+
+set encoding=utf-8
+set fileencodings=ucs-bom,utf-8,cp932,euc-jp,default,latin1
+set fileformats=unix,dos
+" yaft draws ambiguous-width characters as single cells. Setting it here also
+" stops Vim from querying the terminal for the width at startup.
+set ambiwidth=single
+
+set backspace=indent,eol,start
+" Make Esc act immediately instead of waiting for a possible escape sequence.
+set ttimeout
+set ttimeoutlen=10
+
+syntax on
+filetype plugin indent on
