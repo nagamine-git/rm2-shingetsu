@@ -3,7 +3,7 @@ rm2-shingetsu
 
 reMarkable 2 の端末アプリ `yaft` に、**Colemak キーマップ**、**新月配列の日本語入力** (かな漢字変換は mozc)、**CJK グリフ**を加え、**Vim** を同梱したフォークです。[timower/rM2-stuff](https://github.com/timower/rM2-stuff) (GPL-3.0) をもとにしています。
 
-> **実機での動作は未検証です。** エミュレータ上の自動テスト (QEMU で動かした Vim と mozc、スタブを使った `try.sh` / `install.sh` の試運転) までは通していますが、実際の reMarkable 2 ではまだ動かしていません。「未検証」と書いた箇所は、自分の端末で確かめてください。
+> **動作確認**: reMarkable 2 (OS 3.29.1.0) の実機で、`try.sh` による画面表示、Type Folio からの入力、新月配列と mozc による変換まで確認しています。常用のインストール (toltec / opkg)、スリープ (電源ボタン) の動作、Vim の中での日本語入力はまだ確かめていません。「未検証」と書いた箇所は、自分の端末で確かめてください。
 
 ## これは何か、なぜ OS のフォークではないのか
 
@@ -38,9 +38,9 @@ cd rm2-shingetsu
 sh try.sh
 ```
 
-`try.sh` は xochitl を止め、同梱の `rm2fb_server_swtcon` を起動して、`librm2fb_client_swtcon.so` を `LD_PRELOAD` した `yaft` を動かします (上流の [`nix/pkgs/nixos-launcher.sh`](nix/pkgs/nixos-launcher.sh) の起動手順と同じです)。ファームウェアのバージョンが上流の対応リスト (3.20、3.22.4、3.23.0.54 / 3.23.0.64。swtcon モードは 3.28 beta まで報告あり) にない場合は、警告して続けるか尋ねます。
+`try.sh` は xochitl を止め、同梱の `rm2fb_server_swtcon` を起動して、`librm2fb_client_swtcon.so` を `LD_PRELOAD` した `yaft` を動かします (上流の [`nix/pkgs/nixos-launcher.sh`](nix/pkgs/nixos-launcher.sh) の起動手順と同じです)。ファームウェアのバージョンが上流の対応リスト (3.20、3.22.4、3.23.0.54 / 3.23.0.64。swtcon モードは 3.28 beta まで報告あり) にない場合は、警告して続けるか尋ねます。3.29.1.0 は一覧にありませんが、swtcon モードで表示と入力ができることを確認しています。
 
-詳しくはバンドルの [`README-device.ja.md`](shingetsu/bundle/README-device.ja.md) を見てください。**実機では未検証です。**
+詳しくはバンドルの [`README-device.ja.md`](shingetsu/bundle/README-device.ja.md) を見てください。
 
 ## インストール (常用する)
 
@@ -125,7 +125,8 @@ mozc-command = []         # 空でなければ chroot の代わりにこのコ�
 
 ## 制限
 
-- 実機 (reMarkable 2) では未検証です。特に、`try.sh` が `systemctl stop xochitl` した後の挙動、実機の mozc 起動 (mount namespace + chroot + uid 1000)、実際のキー入力は、エミュレータ上のテストでは確かめられていません。
+- 実機で確かめたのは OS 3.29.1.0 の `try.sh` だけです。`install.sh --with-ipk` による常用、ランチャー (rocket) からの起動、スリープ (電源ボタン) の動作は未検証です。
+- 既知の問題: 変換して確定したあと、単語の区切りに余計なスペースが入ることがあります (調査中)。
 - 最近のファームウェアで上流の ipk を使うには、上流の手順 (fstab の編集など) が必要で、リスクがあります。上のとおり `try.sh` を先に使ってください。
 - hazkey は動かせません (上記)。
 - 変換候補の学習履歴は mozc の chroot (`mozc-root/home/mozc`) に保存されます。
@@ -158,6 +159,12 @@ GitHub Actions (`.github/workflows/build.yml`) は、`build` (toltec クロス�
 - 新月配列 [shingetsu-layout](https://github.com/nagamine-git/shingetsu-layout) — MIT (`shingetsu/tables/LICENSE`)。
 
 配布物のすべてのライセンスは、バンドルの `LICENSES/` に入っています。
+
+配布物 (GitHub Actions の成果物) には、他のプロジェクトのバイナリが入っています。対応するソースは次のとおりです。
+
+- このリポジトリの部分 (yaft、rm2fb など): このリポジトリそのもの。
+- mozc の chroot (mozc、glibc、gcc-14 の libstdc++ / libgcc、protobuf、abseil、zlib): Debian trixie のソースパッケージ。正確なバージョンはバンドルの `LICENSES/mozc-root/mozc-root-packages.txt` にあり、[snapshot.debian.org](https://snapshot.debian.org/) または `apt-get source <ソースパッケージ>=<バージョン>` で取得できます。
+- Vim、ncurses、GNU libiconv: [`shingetsu/vim/build-vim.sh`](shingetsu/vim/build-vim.sh) に、取得元の URL と SHA256 を固定しています。Vim は libiconv を静的リンクしているので、同じスクリプトでライブラリを差し替えて再リンクできます。
 
 ---
 
