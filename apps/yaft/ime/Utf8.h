@@ -33,6 +33,49 @@ encodeUtf8(std::u32string_view str) {
   return out;
 }
 
+/// For text that is typed into the terminal or drawn: keeps only well-formed
+/// UTF-8 without C0/C1 controls or DEL, dropping everything else, and stops
+/// after `maxCodepoints` kept characters.
+inline std::string
+sanitizeText(std::string_view str, size_t maxCodepoints = 1024) {
+  std::string out;
+  size_t kept = 0;
+  for (size_t i = 0; i < str.size() && kept < maxCodepoints;) {
+    const auto lead = static_cast<unsigned char>(str[i]);
+    size_t length = 1;
+    char32_t code = lead;
+    if (lead >= 0xC2 && lead <= 0xF4) {
+      length = lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+      code = lead & (0x7F >> length);
+    } else if (lead >= 0x80) {
+      i++;
+      continue;
+    }
+
+    bool valid = i + length <= str.size();
+    for (size_t j = 1; valid && j < length; j++) {
+      const auto cont = static_cast<unsigned char>(str[i + j]);
+      valid = (cont & 0xC0) == 0x80;
+      code = (code << 6) | (cont & 0x3F);
+    }
+    // Not overlong (the 2-byte range starts at 0xC2), no surrogates.
+    valid = valid && !(length == 3 && code < 0x800) &&
+            !(length == 4 && (code < 0x10000 || code > 0x10FFFF)) &&
+            !(code >= 0xD800 && code <= 0xDFFF);
+    if (!valid) {
+      i++;
+      continue;
+    }
+
+    if (code >= 0x20 && (code < 0x7F || code > 0x9F)) {
+      out.append(str.substr(i, length));
+      kept++;
+    }
+    i += length;
+  }
+  return out;
+}
+
 /// Lenient decoder: every malformed byte becomes U+FFFD.
 inline std::u32string
 decodeUtf8(std::string_view str) {

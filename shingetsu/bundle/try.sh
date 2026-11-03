@@ -103,13 +103,24 @@ case $fw_state in
 esac
 
 # --- mozc root ---------------------------------------------------------------
+# Root must not follow a symlink at the places it chowns and chmods (uid 1000
+# writes below the mozc home).
+refuse_unsafe_mozc_home() { # mozc-root
+  for d in "$1/home/mozc" "$1/home/mozc/.config"; do
+    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+      die "$d is a symlink or not a directory; remove it and run again"
+    fi
+  done
+}
+
 extract_mozc() { # destination
   say "Extracting the mozc root to $1 ..."
   rm -rf "$1.new"
   mkdir -p "$1.new"
   tar -xzf "$here/mozc-root-armhf.tar.gz" -C "$1.new"
+  refuse_unsafe_mozc_home "$1.new"
   mkdir -p "$1.new/home/mozc/.config"
-  chown -R "$MOZC_UID:$MOZC_GID" "$1.new/home/mozc"
+  chown -R -h "$MOZC_UID:$MOZC_GID" "$1.new/home/mozc"
   chmod 0700 "$1.new/home/mozc" "$1.new/home/mozc/.config"
   chmod 1777 "$1.new/tmp"
   rm -rf "$1"

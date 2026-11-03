@@ -65,6 +65,15 @@ refuse_if_mounted() {
   fi
 }
 
+# Stop at a symlink or non-directory where we chown, chmod or move.
+refuse_unsafe_dir() { # dir...
+  for d; do
+    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+      die "$d is a symlink or not a directory; remove it and run again"
+    fi
+  done
+}
+
 # cp to a temporary name and rename, so a running binary can be replaced.
 put() { # src dst
   rm -rf "$2.new"
@@ -94,13 +103,16 @@ say "Installing the mozc root into $PREFIX/mozc-root ..."
 new=$P/mozc-root.new
 old=$P/mozc-root
 refuse_if_mounted "$old"
+refuse_unsafe_dir "$old/home/mozc"
 rm -rf "$new" "$P/mozc-root.old"
 mkdir -p "$new"
 tar -xzf "$here/mozc-root-armhf.tar.gz" -C "$new"
 # Keep what mozc learned across reinstalls.
+kept=0
 if [ -d "$old/home/mozc" ]; then
   rm -rf "$new/home/mozc"
   mv "$old/home/mozc" "$new/home/mozc"
+  kept=1
 fi
 if [ -d "$old" ]; then
   mv "$old" "$P/mozc-root.old"
@@ -109,12 +121,26 @@ mv "$new" "$old"
 rm -rf "$P/mozc-root.old"
 # The tarball carries these, but they are what mozc_server needs to start, so
 # make sure whatever tar did with ownership does not matter.
-mkdir -p "$old/home/mozc/.config" "$old/tmp" "$old/proc" "$old/dev"
-if ! chown -R "$MOZC_UID:$MOZC_GID" "$old/home/mozc"; then
+mkdir -p "$old/tmp" "$old/proc" "$old/dev"
+refuse_unsafe_dir "$old/home/mozc"
+chown_failed() {
   [ -n "$DESTROOT" ] || die "chown of the mozc home failed"
   note "chown skipped (staged install)"
+}
+if [ "$kept" -eq 1 ]; then
+  # uid 1000 owns everything inside a used home and may still be running, so
+  # root only touches the directory itself (its parent is root-owned). yaft's
+  # sandboxed child creates .config when it is missing.
+  chown -h "$MOZC_UID:$MOZC_GID" "$old/home/mozc" || chown_failed
+  chmod 0700 "$old/home/mozc"
+else
+  # A fresh tree that no uid 1000 process has touched. -h: BusyBox may
+  # otherwise chown what a symlink points to.
+  refuse_unsafe_dir "$old/home/mozc/.config"
+  mkdir -p "$old/home/mozc/.config"
+  chown -R -h "$MOZC_UID:$MOZC_GID" "$old/home/mozc" || chown_failed
+  chmod 0700 "$old/home/mozc" "$old/home/mozc/.config"
 fi
-chmod 0700 "$old/home/mozc" "$old/home/mozc/.config"
 chmod 1777 "$old/tmp"
 
 # --- command links -----------------------------------------------------------

@@ -50,6 +50,7 @@ ImeResult
 ImeController::handleKey(const ImeKey& key) {
   const auto before = view();
   auto result = dispatchKey(key);
+  result.commit = sanitizeText(result.commit);
   result.changed = view() != before;
   return result;
 }
@@ -64,7 +65,7 @@ ImeController::handleCommand(ImeCommand command) {
   if (enable) {
     isEnabled = true;
   } else if (isEnabled) {
-    result.commit = commitAll();
+    result.commit = sanitizeText(commitAll());
     isEnabled = false;
   }
 
@@ -333,9 +334,11 @@ ImeController::view() {
         break;
       }
 
+      // mozc's text is only drawn, but keep controls out of the bar anyway.
       if (conversion->preedit.has_value()) {
         for (const auto& segment : conversion->preedit->segments) {
-          view.preedit.push_back({ segment.value, segment.highlighted });
+          view.preedit.push_back(
+            { sanitizeText(segment.value), segment.highlighted });
         }
       }
 
@@ -345,8 +348,9 @@ ImeController::view() {
           if (candidate.index == candidates.focusedIndex) {
             view.focused = int(view.candidates.size());
           }
-          view.candidates.push_back(
-            { candidate.shortcut, candidate.value, candidate.description });
+          view.candidates.push_back({ sanitizeText(candidate.shortcut),
+                                      sanitizeText(candidate.value),
+                                      sanitizeText(candidate.description) });
         }
         if (candidates.focusedIndex >= 0 && candidates.size > 0) {
           view.pageInfo = std::to_string(candidates.focusedIndex + 1) + "/" +

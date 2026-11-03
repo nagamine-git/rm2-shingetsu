@@ -80,7 +80,8 @@ private:
   void closePipes();
 
   bool send(const std::string& line);
-  // Reads whatever is available; false on EOF or error.
+  // Reads whatever is available; false on EOF or error, or (marking the
+  // client dead) when the helper has sent too much.
   bool fill();
   std::optional<std::string> takeLine();
   std::optional<std::string> readLine(Clock::time_point deadline);

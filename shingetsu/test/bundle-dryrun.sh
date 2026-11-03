@@ -73,6 +73,104 @@ DESTROOT=$D $SH ./install.sh >/dev/null 2>&1
 [ "$(cat "$P/mozc-root/home/mozc/.config/history")" = learned ] || fail "mozc user data lost on reinstall"
 ok "reinstall keeps mozc user data"
 
+# --- the mozc user plants things in its home ----------------------------------
+# uid 1000 owns mozc-root/home/mozc and may still be running while root
+# reinstalls. Root must therefore only touch the home directory itself; it must
+# not chown, chmod or follow anything inside (symlinks, hard links).
+M=$P/mozc-root/home/mozc
+V=/victim-file
+VD=/victim-dir
+VH=/tmp/victim-hardlink
+echo secret > "$V"
+chmod 0640 "$V"
+mkdir -p "$VD"
+echo secret > "$VD/f"
+chmod 0600 "$VD/f"
+chmod 0750 "$VD"
+echo secret > "$VH"
+chmod 0644 "$VH"
+state() { stat -c '%u:%g %a' "$V" "$VD" "$VD/f" "$VH"; }
+want=$(state)
+[ "$want" = "$(printf '0:0 640\n0:0 750\n0:0 600\n0:0 644')" ] || fail "victim files are not root-owned: $want"
+[ "$(stat -c '%u:%g %a' "$P/mozc-root/home")" = "0:0 755" ] || fail "mozc-root/home is not root-owned: uid 1000 could swap the mozc home"
+echo "info: fs.protected_hardlinks=$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || echo n/a)"
+
+# All processes here are root, so the hard links are made by root; the end
+# state is the same as one uid 1000 made while protected_hardlinks=0.
+ln "$VH" "$M/hardlink" || fail "cannot create a hard link (is $VH on the same filesystem as $M?)"
+ln "$VH" "$M/.config/hardlink"
+ln -s "$V" "$M/evil"
+ln -s "$VD" "$M/evil-dir"
+ln -s "$V" "$M/.config/evil"
+chown 4242:4242 "$M/.config/history"
+chmod 0755 "$M/.config"
+chown 0:0 "$M"
+chmod 0777 "$M"
+DESTROOT=$D $SH ./install.sh >/tmp/install4.log 2>&1 || { cat /tmp/install4.log; fail "install.sh with planted links in the mozc home"; }
+[ "$(state)" = "$want" ] || fail "install.sh touched a file outside the mozc home through a link: $(state)"
+[ "$(stat -c '%h' "$VH")" = 3 ] || fail "hard links to $VH are gone"
+for l in "$M/evil" "$M/evil-dir" "$M/.config/evil" "$M/hardlink" "$M/.config/hardlink"; do
+  [ "$(stat -c '%u:%g' "$l")" = 0:0 ] || fail "install.sh touched $l inside the preserved home"
+done
+[ "$(stat -c '%u:%g' "$M/.config/history")" = 4242:4242 ] || fail "install.sh chowned recursively into the preserved home"
+[ "$(stat -c '%u:%g %a' "$M/.config")" = "1000:1000 755" ] || fail "install.sh chmod-ed .config of the preserved home: $(stat -c '%u:%g %a' "$M/.config")"
+[ "$(stat -c '%u:%g %a' "$M")" = "1000:1000 700" ] || fail "mozc home ownership/mode after reinstall: $(stat -c '%u:%g %a' "$M")"
+[ "$(cat "$M/.config/history")" = learned ] || fail "mozc user data lost"
+rm -f "$M/evil" "$M/evil-dir" "$M/.config/evil" "$M/hardlink" "$M/.config/hardlink"
+chown 1000:1000 "$M/.config/history"
+chmod 0700 "$M/.config"
+ok "install: a preserved mozc home is not recursed into (links, ownership and modes inside stay), only the directory is reset"
+
+# A symlinked .config is neither followed nor touched; a missing one is left
+# for yaft's sandboxed child to create.
+mv "$M/.config" "$M/.config.keep"
+ln -s "$VD" "$M/.config"
+DESTROOT=$D $SH ./install.sh >/tmp/install5.log 2>&1 || { cat /tmp/install5.log; fail "install.sh with a symlinked .config"; }
+[ "$(state)" = "$want" ] || fail "install.sh followed the .config symlink: $(state)"
+[ -L "$M/.config" ] && [ "$(stat -c '%u:%g' "$M/.config")" = 0:0 ] || fail "install.sh touched the .config symlink"
+rm "$M/.config"
+DESTROOT=$D $SH ./install.sh >/tmp/install5.log 2>&1 || { cat /tmp/install5.log; fail "install.sh without .config"; }
+[ ! -e "$M/.config" ] || fail "install.sh created .config in the preserved home"
+mv "$M/.config.keep" "$M/.config"
+ok "install: .config of a preserved home is not followed, touched or created"
+
+# A symlinked mozc home is refused before anything is touched.
+mv "$M" "$M.keep"
+ln -s "$VD" "$M"
+if DESTROOT=$D $SH ./install.sh >/tmp/install6.log 2>&1; then fail "install.sh accepted a symlinked mozc home"; fi
+grep -q 'symlink' /tmp/install6.log || { cat /tmp/install6.log; fail "no explanation for the refused home symlink"; }
+[ "$(state)" = "$want" ] || fail "refused install still changed the symlink target: $(state)"
+[ -f "$P/mozc-root/usr/lib/mozc/mozc_server" ] && [ ! -e "$P/mozc-root.new" ] || fail "refused install touched the mozc root"
+rm "$M"
+mv "$M.keep" "$M"
+DESTROOT=$D $SH ./install.sh >/tmp/install7.log 2>&1 || { cat /tmp/install7.log; fail "install.sh after removing the symlinks"; }
+[ "$(stat -c '%u:%g %a' "$M/.config")" = "1000:1000 700" ] || fail ".config of the preserved home changed"
+[ "$(cat "$M/.config/history")" = learned ] || fail "mozc user data lost"
+ok "install: a symlinked mozc home is refused without touching the target"
+
+# A fresh install (no previous home) still chowns the whole extracted home and
+# creates .config; the repacked tarball has a root-owned file in it.
+F=/tmp/fresh
+mkdir -p "$F"
+ln -s "$b/vim" "$F/vim"
+ln -s "$b/config" "$F/config"
+cp install.sh "$F/install.sh"
+rm -rf /tmp/repack
+mkdir /tmp/repack
+tar -xzf mozc-root-armhf.tar.gz -C /tmp/repack
+rmdir /tmp/repack/home/mozc/.config
+echo seed > /tmp/repack/home/mozc/seed
+chown 0:0 /tmp/repack/home/mozc/seed
+chown 0:0 /tmp/repack/home/mozc
+chmod 0755 /tmp/repack/home/mozc
+tar -cf - -C /tmp/repack . | gzip -c > "$F/mozc-root-armhf.tar.gz"
+DESTROOT=/tmp/dest2 $SH "$F/install.sh" >/tmp/install8.log 2>&1 || { cat /tmp/install8.log; fail "fresh install.sh"; }
+M2=/tmp/dest2/home/root/.local/share/rm2-shingetsu/mozc-root/home/mozc
+[ "$(stat -c '%u:%g %a' "$M2")" = "1000:1000 700" ] || fail "fresh mozc home ownership/mode: $(stat -c '%u:%g %a' "$M2")"
+[ "$(stat -c '%u:%g %a' "$M2/.config")" = "1000:1000 700" ] || fail "fresh mozc .config ownership/mode"
+[ "$(stat -c '%u:%g' "$M2/seed")" = 1000:1000 ] || fail "fresh install did not chown the extracted home recursively"
+ok "install: a fresh mozc home is chowned recursively and gets .config"
+
 # Existing configs are never overwritten.
 echo '# mine' >> "$H/.config/yaft/config.toml"
 echo '" mine' >> "$H/.vimrc"
@@ -93,11 +191,15 @@ if [ "$(uname -m)" = armv7l ] || [ "$(uname -m)" = armv8l ]; then
 fi
 
 # --- uninstall ---------------------------------------------------------------
+ln -s "$V" "$M/evil"
+ln -s "$VD" "$M/evil-dir"
+ln -s "$VD" "$P/mozc-root/tmp/evil-dir"
 DESTROOT=$D $SH ./uninstall.sh >/tmp/uninstall1.log 2>&1 || { cat /tmp/uninstall1.log; fail "uninstall.sh"; }
 [ ! -e "$P" ] || fail "prefix still present"
 [ ! -e "$H/.local/bin/vim" ] || fail "vim link still present"
 [ -f "$H/.config/yaft/config.toml" ] && [ -f "$H/.vimrc" ] || fail "configs were removed without --purge"
-ok "uninstall removes the prefix and links, keeps configs"
+[ "$(state)" = "$want" ] || fail "uninstall.sh followed a symlink: $(state)"
+ok "uninstall removes the prefix and links, keeps configs, ignores planted symlinks"
 DESTROOT=$D $SH ./uninstall.sh --purge >/dev/null 2>&1
 [ ! -e "$H/.config/yaft/config.toml" ] && [ ! -e "$H/.vimrc" ] && [ ! -e "$H/.config/yaft/config.toml.rm2-shingetsu" ] || fail "--purge left configs"
 ok "uninstall --purge removes configs"
@@ -181,6 +283,27 @@ grep -q 'WARNING' /tmp/try3.log || { cat /tmp/try3.log; fail "no warning for unl
 [ "$rc" -ne 0 ] || fail "try.sh continued after declining"
 if [ -f /tmp/systemctl.log ] && grep -q 'stop' /tmp/systemctl.log; then fail "services stopped despite declining"; fi
 ok "try.sh warns about unlisted firmware and stops when declined"
+
+# A mozc tarball with symlinks in the mozc home: not followed / refused.
+repack() { # extra command run in the extracted root
+  rm -rf /tmp/repack
+  mkdir /tmp/repack
+  tar -xzf /tmp/mozc-orig.tar.gz -C /tmp/repack
+  (cd /tmp/repack && eval "$1")
+  tar -cf - -C /tmp/repack . | gzip -c > "$b/mozc-root-armhf.tar.gz"
+}
+cp "$b/mozc-root-armhf.tar.gz" /tmp/mozc-orig.tar.gz
+repack "ln -s $V home/mozc/evil"
+rm -rf "$T"
+$SH ./try.sh --yes >/tmp/try4.log 2>&1 || { cat /tmp/try4.log; fail "try.sh with a symlink in the mozc home"; }
+[ "$(state)" = "$want" ] || fail "try.sh followed a symlink out of the mozc home: $(state)"
+[ "$(stat -c '%u:%g' "$T/mozc-root/home/mozc/evil")" = 1000:1000 ] || fail "try.sh: the symlink itself was not chowned"
+repack "rm -rf home/mozc/.config && ln -s $VD home/mozc/.config"
+rm -rf "$T"
+if $SH ./try.sh --yes >/tmp/try5.log 2>&1; then fail "try.sh accepted a symlinked .config"; fi
+grep -q 'symlink' /tmp/try5.log || { cat /tmp/try5.log; fail "try.sh: no explanation for the refused .config symlink"; }
+[ "$(state)" = "$want" ] || fail "try.sh changed the target of the .config symlink: $(state)"
+ok "try.sh: symlinks in the mozc root tarball are not followed, a symlinked .config is refused"
 INNER
 
 run() { # image platform label shell

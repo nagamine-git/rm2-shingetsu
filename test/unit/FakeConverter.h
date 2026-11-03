@@ -24,6 +24,8 @@ public:
   bool failNext = false;
   int restarts = 0;
   int num_candidates = 12;
+  // Replaces every candidate text (preedit, candidate list, result).
+  std::optional<std::string> candidate_text;
 
   // One entry per sendKeys() call, each key in the form "97:わ" / "space".
   std::vector<std::vector<std::string>> calls;
@@ -71,6 +73,9 @@ private:
   }
 
   std::string candidate(int i) const {
+    if (candidate_text.has_value()) {
+      return *candidate_text;
+    }
     return i == 0 ? reading : reading + "#" + std::to_string(i);
   }
 

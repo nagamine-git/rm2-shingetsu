@@ -47,7 +47,8 @@ struct ImeKey {
 enum class ImeCommand { On, Off, Toggle };
 
 struct ImeResult {
-  /// UTF-8 text to type into the terminal.
+  /// UTF-8 text to type into the terminal. Sanitized (untrusted mozc text):
+  /// no control characters, valid UTF-8, length capped.
   std::string commit;
   /// The key was not consumed; send it on to the terminal (after `commit`).
   bool passthrough = false;

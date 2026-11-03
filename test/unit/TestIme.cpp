@@ -1006,6 +1006,156 @@ TEST_CASE("IME: mozc not ready", "[ime][controller]") {
   }
 }
 
+TEST_CASE("IME: text from mozc is sanitized", "[ime][controller]") {
+  Harness h;
+  h.ime.handleCommand(ime::ImeCommand::On);
+  h.type("sidfyvshsl");
+
+  // Converts with `text` as the only candidate and commits with Enter.
+  const auto commitWith = [&](std::string text) {
+    h.conv.candidate_text = std::move(text);
+    h.ime.handleKey(ch(' '));
+    const auto result = h.ime.handleKey(named(Special::Enter));
+    CHECK_FALSE(result.passthrough);
+    return result.commit;
+  };
+
+  SECTION("control characters and escape sequences") {
+    CHECK(commitWith("私\x1b[2J\nrm -rf /") == "私[2Jrm -rf /");
+  }
+
+  SECTION("C1 character (CSI)") {
+    CHECK(commitWith("私\xC2\x9B"
+                     "2J") == "私2J");
+  }
+
+  SECTION("lone C1 character") {
+    CHECK(commitWith("\xC2\x85") == "");
+  }
+
+  SECTION("invalid UTF-8") {
+    CHECK(commitWith("私\xFF\xC0\x9B"
+                     "[0m\xE3\x81") == "私[0m");
+  }
+
+  SECTION("length is capped") {
+    std::string longText;
+    std::string capped;
+    for (int i = 0; i < 2000; i++) {
+      longText += "あ";
+      if (i < 1024) {
+        capped += "あ";
+      }
+    }
+    CHECK(commitWith(longText) == capped);
+  }
+
+  SECTION("typing on while converting") {
+    h.conv.candidate_text = "私\x1b\n";
+    h.ime.handleKey(ch(' '));
+    const auto result = h.ime.handleKey(ch('r'));
+    CHECK(result.commit == "私");
+    CHECK(h.text() == "か");
+  }
+
+  SECTION("turning the IME off while converting") {
+    h.conv.candidate_text = "私\x1b\n";
+    h.ime.handleKey(ch(' '));
+    CHECK(h.ime.handleKey(ctrl(' ')).commit == "私");
+    CHECK_FALSE(h.ime.enabled());
+  }
+
+  SECTION("preedit and candidates are safe to draw") {
+    h.conv.candidate_text = "a\x1b[31mb\xFF"
+                            "c\xC2\x85";
+    h.ime.handleKey(ch(' '));
+    h.ime.handleKey(ch(' '));
+    const auto view = h.ime.view();
+    REQUIRE(view.preedit.size() == 1);
+    CHECK(view.preedit[0].text == "a[31mbc");
+    REQUIRE_FALSE(view.candidates.empty());
+    for (const auto& candidate : view.candidates) {
+      CHECK(candidate.value == "a[31mbc");
+    }
+  }
+}
+
+TEST_CASE("IME: local commits are sanitized", "[ime][controller]") {
+  // A table (user supplied) that types an escape character and DEL.
+  ime::ImeController controller(ime::Composer::fromTsv("q\t\x1b"
+                                                       "x\nw\t\x7f"
+                                                       "y\n"),
+                                nullptr);
+  controller.handleCommand(ime::ImeCommand::On);
+
+  controller.handleKey(ch('q'));
+  CHECK(controller.handleKey(named(Special::Enter)).commit == "x");
+
+  controller.handleKey(ch('w'));
+  CHECK(controller.handleCommand(ime::ImeCommand::Off).commit == "y");
+}
+
+TEST_CASE("Utf8: sanitizeText", "[ime][utf8]") {
+  using ime::sanitizeText;
+
+  SECTION("keeps text") {
+    CHECK(sanitizeText("") == "");
+    CHECK(sanitizeText("私の名前 abc ~") == "私の名前 abc ~");
+    // U+00A0 (first non-C1), U+D7FF, U+10FFFF and an emoji.
+    const std::string_view kept =
+      "\xC2\xA0\xED\x9F\xBF\xF4\x8F\xBF\xBF\xF0\x9F\x98\x80";
+    CHECK(sanitizeText(kept) == kept);
+  }
+
+  SECTION("drops C0, DEL and C1") {
+    CHECK(sanitizeText("a\t\r\nb\x1b"
+                       "c") == "abc");
+    CHECK(sanitizeText(std::string("a\0b", 3)) == "ab");
+    CHECK(sanitizeText("a\x7f"
+                       "b") == "ab");
+    CHECK(sanitizeText("a\xC2\x80"
+                       "b\xC2\x9F"
+                       "c") == "abc");
+  }
+
+  SECTION("drops malformed UTF-8") {
+    CHECK(sanitizeText("\xFF"
+                       "a\xFE") == "a");
+    CHECK(sanitizeText("a\x80\xBF"
+                       "b") == "ab");
+    CHECK(sanitizeText("a\xE3\x81") == "a");
+    CHECK(sanitizeText("\xE3\x81"
+                       "a") == "a");
+    // Overlong forms of ESC, surrogates, beyond U+10FFFF.
+    CHECK(sanitizeText("\xC0\x9B"
+                       "[") == "[");
+    CHECK(sanitizeText("\xE0\x80\x9B"
+                       "[") == "[");
+    CHECK(sanitizeText("\xF0\x80\x80\x9B"
+                       "[") == "[");
+    CHECK(sanitizeText("\xED\xA0\x80") == "");
+    CHECK(sanitizeText("\xF4\x90\x80\x80") == "");
+    CHECK(sanitizeText("\xF5\x80\x80\x80") == "");
+  }
+
+  SECTION("a bad lead byte does not swallow the next character") {
+    CHECK(sanitizeText("a\xE3\x1b"
+                       "b") == "ab");
+    CHECK(sanitizeText("\xC3\x1b"
+                       "[") == "[");
+  }
+
+  SECTION("caps the number of kept codepoints") {
+    CHECK(sanitizeText("abcdef", 3) == "abc");
+    CHECK(sanitizeText("あいう", 2) == "あい");
+    CHECK(sanitizeText("\x1b"
+                       "a\xFF"
+                       "b",
+                       2) == "ab");
+    CHECK(sanitizeText("abc", 0) == "");
+  }
+}
+
 TEST_CASE("MozcClient: replayed transcript", "[ime][mozc][process]") {
   TemporaryDirectory tmp;
   const auto script = tmp.dir / "helper.sh";
@@ -1144,6 +1294,51 @@ exec sleep 10)";
 
     client.restart(); // too soon
     CHECK(client.pid() == -1);
+  }
+}
+
+TEST_CASE("MozcClient: runaway helper output", "[ime][mozc][process]") {
+  // Far more than any reply, but finite: the helper then just sits there.
+  const std::string flood =
+    "exec 2>/dev/null; head -c 8000000 /dev/zero | tr '\\0' x";
+  const std::string replies = R"(
+read a; echo '((emacs-event-id . 1)(emacs-session-id . 1)(output . ()))'
+read b; echo '((emacs-event-id . 2)(emacs-session-id . 1)(output . ()))'
+)";
+  const auto tooLong = [](const ime::MozcClient& client) {
+    return client.lastError().find("too long") != std::string::npos;
+  };
+
+  SECTION("no newline during startup") {
+    ime::MozcClient client(shOptions(flood + "; exec sleep 30"));
+    REQUIRE(client.start());
+    CHECK_FALSE(client.waitReady(5000ms));
+    CHECK(client.state() == ime::ConverterState::Unavailable);
+    CHECK(client.fd() == -1);
+    CHECK(tooLong(client));
+  }
+
+  SECTION("no newline in a reply") {
+    ime::MozcClient client(shOptions(std::string(greeting) + replies +
+                                     "read c; " + flood + "; exec sleep 30"));
+    REQUIRE(client.start());
+    REQUIRE(client.waitReady(5000ms));
+
+    CHECK_FALSE(
+      client.sendKeys({ ime::mozcSymbolKey({ "space" }) }).has_value());
+    CHECK(client.state() == ime::ConverterState::Unavailable);
+    CHECK(client.fd() == -1);
+    CHECK(tooLong(client));
+  }
+
+  SECTION("a long line below the limit is fine") {
+    const std::string longGreeting =
+      R"(printf '((mozc-emacs-helper . t)(version . "'; head -c 900000 /dev/zero | tr '\0' x; echo '")(config . ((preedit-method . roman))))')";
+    ime::MozcClient client(
+      shOptions(longGreeting + replies + "cat > /dev/null"));
+    REQUIRE(client.start());
+    CHECK(client.waitReady(5000ms));
+    CHECK(client.state() == ime::ConverterState::Ready);
   }
 }
 

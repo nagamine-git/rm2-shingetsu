@@ -28,6 +28,10 @@ using namespace std::chrono_literals;
 constexpr auto startup_timeout = 60s;
 constexpr auto respawn_interval = 5s;
 
+// Replies are a few KiB; a helper that sends more than this without us
+// consuming it is broken or hostile.
+constexpr size_t max_inbuf = 1 << 20;
+
 constexpr const char* helper_path = "/usr/bin/mozc_emacs_helper";
 
 // The child only uses async-signal-safe calls, so report errors by hand.
@@ -293,6 +297,10 @@ MozcClient::fill() {
     const auto n = read(outFd, buf, sizeof(buf));
     if (n > 0) {
       inbuf.append(buf, size_t(n));
+      if (inbuf.size() > max_inbuf) {
+        markDead("helper output too long");
+        return false;
+      }
       continue;
     }
     if (n == 0) {
