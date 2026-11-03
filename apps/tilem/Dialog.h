@@ -22,6 +22,10 @@ public:
     rmlib::TimerHandle startTimer;
   };
 
+  // The tests probe this URL to decide whether the download can be tested.
+  static constexpr auto romUrl =
+    "http://ipfs.io/ipfs/QmSNmqjQ1Ao4jff9pXbzv98ebuCzKf2ZuyEpSGL31D8z44";
+
   DownloadDialog(std::string_view romPath) : romPath(romPath) {}
 
   static State createState();
