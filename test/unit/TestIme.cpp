@@ -7,15 +7,19 @@
 #include "ime/ImeController.h"
 #include "ime/MozcClient.h"
 #include "ime/MozcProtocol.h"
+#include "ime/MozcServer.h"
 #include "ime/Sexp.h"
 #include "ime/Utf8.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 #include <signal.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 using namespace std::chrono_literals;
 
@@ -1339,6 +1343,308 @@ read b; echo '((emacs-event-id . 2)(emacs-session-id . 1)(output . ()))'
     REQUIRE(client.start());
     CHECK(client.waitReady(5000ms));
     CHECK(client.state() == ime::ConverterState::Ready);
+  }
+}
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// A canonical mozc root, so that its paths equal what /proc/<pid>/exe says.
+struct MozcRoot {
+  MozcRoot() : path(fs::canonical(dir.dir)) {}
+
+  std::string str() const { return path.string(); }
+  fs::path server() const { return path / "usr/lib/mozc/mozc_server"; }
+  fs::path helper() const { return path / "usr/bin/mozc_emacs_helper"; }
+
+  TemporaryDirectory dir;
+  fs::path path;
+};
+
+// A directory shaped like /proc: <pid>/status and <pid>/exe.
+struct FakeProc {
+  void add(int pid, unsigned uid, const fs::path& exe) {
+    const auto pidDir = dir.dir / std::to_string(pid);
+    fs::create_directories(pidDir);
+    std::ofstream(pidDir / "cmdline") << "/usr/lib/mozc/mozc_server";
+    std::ofstream(pidDir / "status")
+      << "Name:\tmozc_server\nUid:\t" << uid << '\t' << uid << '\t' << uid
+      << '\t' << uid << "\nGid:\t1000\t1000\t1000\t1000\n";
+    fs::create_symlink(exe, pidDir / "exe");
+  }
+
+  std::vector<pid_t> servers(const MozcRoot& root, uid_t uid = 1000) const {
+    auto found = ime::findMozcProcesses(dir.dir.string(), root.str(), uid);
+    std::sort(found.servers.begin(), found.servers.end());
+    return found.servers;
+  }
+
+  TemporaryDirectory dir;
+};
+
+// A real process whose /proc/<pid>/exe is `path`: a copy of sleep.
+class FakeDaemon {
+public:
+  explicit FakeDaemon(const fs::path& path, bool ignoreTerm = false) {
+    fs::create_directories(path.parent_path());
+    fs::copy_file(
+      fs::canonical("/bin/sleep"), path, fs::copy_options::overwrite_existing);
+
+    pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+      if (ignoreTerm) {
+        signal(SIGTERM, SIG_IGN);
+      }
+      execl(path.c_str(), "daemon", "60", nullptr);
+      _exit(127);
+    }
+
+    // Until the exec, /proc/<pid>/exe is still this test.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    char buf[4096];
+    while (true) {
+      const auto link = "/proc/" + std::to_string(pid) + "/exe";
+      const auto n = readlink(link.c_str(), buf, sizeof(buf));
+      if (n > 0 && std::string(buf, size_t(n)) == path.string()) {
+        break;
+      }
+      REQUIRE(std::chrono::steady_clock::now() < deadline);
+      usleep(5000);
+    }
+  }
+
+  FakeDaemon(const FakeDaemon&) = delete;
+  FakeDaemon& operator=(const FakeDaemon&) = delete;
+
+  ~FakeDaemon() {
+    if (!status.has_value()) {
+      kill(pid, SIGKILL);
+      waitpid(pid, nullptr, 0);
+    }
+  }
+
+  // The wait status, if the process ended within `timeout`.
+  std::optional<int> waitStatus(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!status.has_value()) {
+      int raw = 0;
+      if (waitpid(pid, &raw, WNOHANG) == pid) {
+        status = raw;
+      } else if (std::chrono::steady_clock::now() >= deadline) {
+        break;
+      } else {
+        usleep(5000);
+      }
+    }
+    return status;
+  }
+
+  bool killedBy(int signo) {
+    const auto raw = waitStatus(2s);
+    return raw.has_value() && WIFSIGNALED(*raw) && WTERMSIG(*raw) == signo;
+  }
+
+private:
+  pid_t pid = -1;
+  std::optional<int> status;
+};
+
+} // namespace
+
+TEST_CASE("MozcServer: scanning a proc tree", "[ime][mozc-server]") {
+  const MozcRoot root;
+  const MozcRoot other;
+  FakeProc proc;
+
+  SECTION("a server of the right owner and root is found") {
+    proc.add(100, 1000, root.server());
+    proc.add(7, 1000, root.server());
+    CHECK(proc.servers(root) == std::vector<pid_t>{ 7, 100 });
+  }
+
+  SECTION("another owner is not") {
+    proc.add(100, 0, root.server());
+    proc.add(101, 1001, root.server());
+    CHECK(proc.servers(root).empty());
+    CHECK(proc.servers(root, 1001) == std::vector<pid_t>{ 101 });
+  }
+
+  SECTION("another executable is not") {
+    // The cmdline of a server in the chroot is the same as the host's.
+    proc.add(100, 1000, "/usr/lib/mozc/mozc_server");
+    proc.add(101, 1000, root.path / "usr/lib/mozc/mozc_server_x");
+    proc.add(102, 1000, root.path / "usr/bin/vim");
+    proc.add(103, 1000, root.server().string() + "/x");
+    CHECK(proc.servers(root).empty());
+  }
+
+  SECTION("another root is not") {
+    proc.add(100, 1000, other.server());
+    CHECK(proc.servers(root).empty());
+    CHECK(proc.servers(other) == std::vector<pid_t>{ 100 });
+  }
+
+  SECTION("the root may be given as a symlink") {
+    TemporaryDirectory links;
+    fs::create_directory_symlink(root.path, links.dir / "link");
+    proc.add(100, 1000, root.server());
+    const auto found = ime::findMozcProcesses(
+      proc.dir.dir.string(), (links.dir / "link").string(), 1000);
+    CHECK(found.servers == std::vector<pid_t>{ 100 });
+  }
+
+  SECTION("a server whose binary was replaced is still found") {
+    proc.add(100, 1000, root.server().string() + " (deleted)");
+    CHECK(proc.servers(root) == std::vector<pid_t>{ 100 });
+  }
+
+  SECTION("a missing root matches nothing") {
+    proc.add(100, 1000, "/nonexistent-root/usr/lib/mozc/mozc_server");
+    const auto found =
+      ime::findMozcProcesses(proc.dir.dir.string(), "/nonexistent-root", 1000);
+    CHECK(found.servers.empty());
+    CHECK_FALSE(found.helperRunning);
+  }
+
+  SECTION("a missing proc directory matches nothing") {
+    const auto found =
+      ime::findMozcProcesses("/nonexistent-proc", root.str(), 1000);
+    CHECK(found.servers.empty());
+    CHECK_FALSE(found.helperRunning);
+  }
+
+  SECTION("entries that are not processes, or unreadable, are skipped") {
+    fs::create_directories(proc.dir.dir / "self");
+    fs::create_directories(proc.dir.dir / "12abc");
+    std::ofstream(proc.dir.dir / "13") << "a file";
+    proc.add(100, 1000, root.server());
+    fs::remove(proc.dir.dir / "100" / "status");  // owner unknown
+    fs::create_directories(proc.dir.dir / "101"); // no exe
+    std::ofstream(proc.dir.dir / "101" / "status") << "Uid:\t1000\t1000\n";
+    CHECK(proc.servers(root).empty());
+  }
+
+  SECTION("the helper is reported, whoever runs it") {
+    proc.add(100, 1000, root.server());
+    CHECK_FALSE(ime::findMozcProcesses(proc.dir.dir.string(), root.str(), 1000)
+                  .helperRunning);
+
+    proc.add(200, 0, other.helper());
+    CHECK_FALSE(ime::findMozcProcesses(proc.dir.dir.string(), root.str(), 1000)
+                  .helperRunning);
+
+    proc.add(201, 0, root.helper());
+    const auto found =
+      ime::findMozcProcesses(proc.dir.dir.string(), root.str(), 1000);
+    CHECK(found.helperRunning);
+    CHECK(found.servers == std::vector<pid_t>{ 100 });
+  }
+}
+
+TEST_CASE("MozcServer: stopping stale servers", "[ime][mozc][process]") {
+  const MozcRoot root;
+  const MozcRoot other;
+  const auto uid = getuid();
+  const auto stop = [&](uid_t owner, std::chrono::milliseconds grace) {
+    ime::stopStaleMozcServers("/proc", root.str(), owner, grace);
+  };
+
+  SECTION("a stale server gets SIGTERM") {
+    FakeDaemon stale(root.server());
+    stop(uid, 2s);
+    CHECK(stale.killedBy(SIGTERM));
+  }
+
+  SECTION("a server that ignores SIGTERM gets SIGKILL after the grace time") {
+    FakeDaemon stale(root.server(), /* ignoreTerm */ true);
+    stop(uid, 200ms);
+    CHECK(stale.killedBy(SIGKILL));
+  }
+
+  SECTION("a running helper means the server is in use") {
+    FakeDaemon stale(root.server());
+    FakeDaemon user(root.helper());
+    stop(uid, 200ms);
+    CHECK_FALSE(stale.waitStatus(300ms).has_value());
+  }
+
+  SECTION("a helper of another root does not matter") {
+    FakeDaemon stale(root.server());
+    FakeDaemon user(other.helper());
+    stop(uid, 2s);
+    CHECK(stale.killedBy(SIGTERM));
+  }
+
+  SECTION("another owner is left alone") {
+    FakeDaemon foreign(root.server());
+    stop(uid + 1, 200ms);
+    CHECK_FALSE(foreign.waitStatus(300ms).has_value());
+  }
+
+  SECTION("another root is left alone") {
+    FakeDaemon elsewhere(other.server());
+    stop(uid, 200ms);
+    CHECK_FALSE(elsewhere.waitStatus(300ms).has_value());
+  }
+
+  SECTION("nothing running") {
+    stop(uid, 200ms);
+  }
+}
+
+TEST_CASE("MozcClient: stale mozc servers", "[ime][mozc][process]") {
+  // Without the privileges for the chroot the helper dies right away, which
+  // is all that is needed here: mozc itself is played by FakeDaemon.
+  const MozcRoot root;
+  ime::MozcClient::Options options;
+  options.root = root.str();
+  options.uid = int(getuid());
+
+  SECTION("start() stops the server an earlier run left") {
+    FakeDaemon stale(root.server());
+    ime::MozcClient client(options);
+    REQUIRE(client.start());
+    CHECK(stale.killedBy(SIGTERM));
+  }
+
+  SECTION("start() keeps a server that another instance uses") {
+    FakeDaemon server(root.server());
+    FakeDaemon user(root.helper());
+    ime::MozcClient client(options);
+    REQUIRE(client.start());
+    CHECK_FALSE(server.waitStatus(300ms).has_value());
+  }
+
+  SECTION("a helper that died takes the server with it") {
+    ime::MozcClient client(options);
+    REQUIRE(client.start());
+    FakeDaemon server(root.server()); // as started by the helper
+    CHECK_FALSE(client.waitReady(5000ms));
+    CHECK(client.state() == ime::ConverterState::Unavailable);
+    CHECK(server.killedBy(SIGTERM));
+  }
+
+  SECTION("shutting down stops the server") {
+    std::optional<FakeDaemon> server;
+    {
+      ime::MozcClient client(options);
+      REQUIRE(client.start());
+      server.emplace(root.server());
+    }
+    CHECK(server->killedBy(SIGTERM));
+  }
+
+  SECTION("a custom command never touches servers") {
+    options.command = { "/bin/sh", "-c", "exit 1" };
+    FakeDaemon server(root.server());
+    {
+      ime::MozcClient client(options);
+      REQUIRE(client.start());
+      CHECK_FALSE(client.waitReady(5000ms));
+    }
+    CHECK_FALSE(server.waitStatus(300ms).has_value());
   }
 }
 

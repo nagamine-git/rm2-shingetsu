@@ -10,7 +10,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/shingetsu/fonts
 # Input method logic without any UI or framebuffer dependency.
 add_library(
   yaft_ime_lib STATIC
-  ime/Composer.cpp ime/ImeController.cpp ime/MozcClient.cpp
+  ime/Composer.cpp ime/ImeController.cpp ime/MozcClient.cpp ime/MozcServer.cpp
   ime/MozcProtocol.cpp ime/Sexp.cpp)
 target_include_directories(yaft_ime_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(yaft_ime_lib PUBLIC Shingetsu::tables)

@@ -78,6 +78,8 @@ private:
                                           int stdoutFd);
   void markDead(const std::string& reason);
   void closePipes();
+  void reapChild();
+  void stopStaleServers();
 
   bool send(const std::string& line);
   // Reads whatever is available; false on EOF or error, or (marking the

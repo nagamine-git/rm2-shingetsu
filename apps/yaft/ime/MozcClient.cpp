@@ -1,5 +1,7 @@
 #include "MozcClient.h"
 
+#include "MozcServer.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
@@ -27,6 +29,8 @@ using namespace std::chrono_literals;
 // tablet, but it must not hang forever either.
 constexpr auto startup_timeout = 60s;
 constexpr auto respawn_interval = 5s;
+// The helper quits by itself once its stdin is closed.
+constexpr auto helper_exit_timeout = 500ms;
 
 // Replies are a few KiB; a helper that sends more than this without us
 // consuming it is broken or hostile.
@@ -80,6 +84,7 @@ MozcClient::start() {
 
   markDead("restarting");
   error.clear();
+  stopStaleServers();
   return spawn();
 }
 
@@ -220,18 +225,51 @@ MozcClient::closePipes() {
 }
 
 void
+MozcClient::reapChild() {
+  if (child <= 0) {
+    return;
+  }
+
+  // The chroot helper gets to finish; a custom command is just killed.
+  if (options.command.empty()) {
+    const auto deadline = Clock::now() + helper_exit_timeout;
+    while (Clock::now() < deadline) {
+      // Fails if the SIGCHLD handler was faster.
+      if (waitpid(child, nullptr, WNOHANG) != 0) {
+        child = -1;
+        return;
+      }
+      poll(nullptr, 0, 10);
+    }
+  }
+
+  kill(child, SIGKILL);
+  // May already have been reaped by the SIGCHLD handler.
+  waitpid(child, nullptr, 0);
+  child = -1;
+}
+
+// mozc_server outlives the helper in the helper's mount namespace, where
+// later helpers can neither verify nor replace it.
+void
+MozcClient::stopStaleServers() {
+  if (options.command.empty()) {
+    stopStaleMozcServers("/proc", options.root, uid_t(options.uid));
+  }
+}
+
+void
 MozcClient::markDead(const std::string& reason) {
-  if (phase != Phase::Dead || child > 0) {
+  const bool wasRunning = phase != Phase::Dead || child > 0;
+  if (wasRunning) {
     error = reason;
   }
   phase = Phase::Dead;
   closePipes();
+  reapChild();
 
-  if (child > 0) {
-    kill(child, SIGKILL);
-    // May already have been reaped by the SIGCHLD handler.
-    waitpid(child, nullptr, 0);
-    child = -1;
+  if (wasRunning) {
+    stopStaleServers();
   }
 }
 
